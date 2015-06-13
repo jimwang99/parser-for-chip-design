@@ -6,14 +6,34 @@ from netlist import *
 
 ################################################################
 
-def spice_netlist_parser (ls_spice_netlist_fpath, nmos='NCH_MAC', pmos='PCH_MAC'):
+def spice_netlist_parser (ls_spice_netlist_fpath, nmos_name='NCH_MAC NCH_MAC_PSVT NCH_MAC_NSVT', pmos_name='PCH_MAC NCH_MAC_PSVT NCH_MAC_NSVT'):
     """
     >> class design_t()
     """
     design = design_t()
 
-    ls_nmos = nmos.lower().split()
-    ls_pmos = pmos.lower().split()
+    ls_nmos_name = nmos_name.lower().split()
+    ls_pmos_name = pmos_name.lower().split()
+
+    for mos_name in (ls_nmos+ls_pmos):
+        mos = design.add_module(mos_name)
+        assert mos
+
+        mos.is_hierarchical = False
+        if (mos_name in ls_nmos_name):
+            mos.is_nmos = True
+            mos.is_pmos = False
+        elif (mos_name in ls_pmos_name):
+            mos.is_nmos = False
+            mos.is_pmos = True
+
+        mos.add_port('d', 'bidirection')
+        mos.add_port('g', 'bidirection')
+        mos.add_port('b', 'bidirection')
+        mos.add_port('s', 'bidirection')
+        mos.add_param('l', 28e-9)
+        mos.add_param('w', 28e-9)
+        mos.add_param('w', 28e-9)
 
     #===========================================================
     # read all spice netlist file into memory (ls_raw)
@@ -83,16 +103,25 @@ def spice_netlist_parser (ls_spice_netlist_fpath, nmos='NCH_MAC', pmos='PCH_MAC'
         # parse subckt title
         if (first == '.subckt'):
             module_name = ls_tk[1]
-            ls_port_name = ls_tk[2:]
+            try:
+                idx_equal = ls_tk.index('=')
+                ls_port_name = ls_tk[2:idx_equal-1]
+                ls_param_tk = ls_tk[idx_equal-1:]
+            except:
+                ls_port_name = ls_tk[2:]
+                ls_param_tk = list()
 
             assert module == None
             module = module_t(module_name)
             design.modules[module.name] = module
 
-            module.ls_port_name = ls_port_name # preserve the order of ports
+            # port
             for port_name in ls_port_name:
-                port = port_t(port_name, module, 'bidirection')
-                module.ports[port.name] = port
+                module.add_port(port_name, 'bidirection')
+
+            # param
+            for (param_name, param_value) in parse_param_token(ls_param_tk):
+                module.add_param(param_name, param_value)
 
         #-------------------------------------------------------
         # parse module end
@@ -104,15 +133,17 @@ def spice_netlist_parser (ls_spice_netlist_fpath, nmos='NCH_MAC', pmos='PCH_MAC'
         # parse instance
         elif (first[0] == 'x') or (first[0] == 'm'):
             instance_name = ls_tk[0]
+            instance = instance_t(instance_name, module)
 
             try:
-                idx = ls_tk.index('=') - 2
+                idx_equal = ls_tk.index('=')
+                instance.master_module_name = ls_tk[idx]
+                instance.ls_pin_connect = ls_tk[1:idx_equal-1]
+                instance.ls_param_tk = ls_tk[idx_equal-1:]
             except:
-                idx = -1
-
-            instance = instance_t(instance_name, module)
-            instance.master_module_name = ls_tk[idx]
-            instance.ls_pin_connection = ls_tk[1:idx]
+                instance.master_module_name = ls_tk[-1]
+                instance.ls_pin_connect = ls_tk[1:-1]
+                instance.ls_param_tk = list()
 
             module.instances[instance.name] = instance
 
@@ -134,26 +165,41 @@ def spice_netlist_parser (ls_spice_netlist_fpath, nmos='NCH_MAC', pmos='PCH_MAC'
             print 'Warning: Statement is not supported at line (%d to %d) in file (%s) \"%s\"' % (begin_line_idx+1, end_line_idx+1, ls_spice_netlist_fpath[fpath_idx], stmt)
 
     #===========================================================
-    # solve instance reference and pin connection
+    # solve instance reference and pin connect
     for module in design.modules.values():
         for instance in module.instances.values():
             # instance's master module
-            if (instance.master_module_name in ls_nmos):
-                instance.is_mos = True
-            elif (instance.master_module_name in ls_pmos):
-                instance.is_mos = True
-            else:
-                instance.master_module = design.modules[instance.master_module_name]
+            instance.master_module = design.modules[instance.master_module_name]
             del instance.master_module_name
 
-            # instance's pin connection
-            assert len(instance.ls_pin_connection) == len(instance.master_module.ls_port_name), ' (PIN) %s\n((PORT)%s' % (instance.ls_pin_connection, instance.master_module.ls_port_name)
+            # instance's pin connect
+            assert len(instance.ls_pin_connect) == len(instance.master_module.ls_port), ' (PIN) %s\n((PORT)%s' % (instance.ls_pin_connect, instance.master_module.ports.keys())
 
-            for (pin_connection, port_name) in zip(instance.ls_pin_connection, instance.master_module.ls_port_name):
-                pin = pin_t(instance.master_module.ports[port_name], instance)
-                instance.pins[pin.name] = pin
+            for (connect_name, port) in zip(instance.ls_pin_connect, instance.master_module.ls_port):
+                instance.connect_pin(port.name, connect_name)
+
+            # instance's parameter
 
     return design
+
+def parse_param_token (ls_tk):
+    '>> (name, value)
+    ls_param = list()
+    while len(ls_tk) > 0:
+        name = ls_tk.pop(0)
+        assert ls_tk.pop(0) == '=', ls_tk
+        try:
+            next_idx_equal = ls_tk.index('=')
+            value = ''.join(ls_tk[:next_idx_equal-1])
+            ls_tk = ls_tk[next_idx_equal-1:]
+        except:
+            value = ''.join(ls_tk)
+            ls_tk = list()
+        value = value.strip("'")
+
+        ls_param.append((name, value))
+
+    return ls_param
 
 
 if __name__ == '__main__':
